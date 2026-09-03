@@ -144,6 +144,7 @@ struct ets_header {
   uint32_t dimz;
   uint8_t backgroundColor[3];
   bool usePyramid;
+  int32_t boundary[7];
 };
 
 struct tile {
@@ -856,6 +857,28 @@ int ascending_compare (const void * a, const void * b) {
   return ( *(uint32_t*)b - *(uint32_t*)a );
 }
 
+// Visible size from ETS boundary_size (offset 184). ETS 0x30006 stores
+// (ndim, width, height, ...); older writers store (width, height, ...).
+static bool ets_level0_size(const struct ets_header *eh,
+                            uint32_t *width, uint32_t *height) {
+  int32_t b0 = eh->boundary[0];
+  int32_t b1 = eh->boundary[1];
+  int32_t b2 = eh->boundary[2];
+
+  if (b0 >= (int32_t) eh->dimx && b1 >= (int32_t) eh->dimy) {
+    *width = (uint32_t) b0;
+    *height = (uint32_t) b1;
+    return true;
+  }
+  if (b0 >= 1 && b0 <= 7 &&
+      b1 >= (int32_t) eh->dimx && b2 >= (int32_t) eh->dimy) {
+    *width = (uint32_t) b1;
+    *height = (uint32_t) b2;
+    return true;
+  }
+  return false;
+}
+
 
 static bool olympus_open_ets(openslide_t *osr, const char *filename,
                              struct _openslide_tifflike *tl,
@@ -889,6 +912,17 @@ static bool olympus_open_ets(openslide_t *osr, const char *filename,
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Errors in ETS header");
     goto FAIL;
+  }
+
+  // boundary_size lives at ETS additional-header offset 184 (v >= 0x30004).
+  // Seek absolutely: ets_header_read does not consume the later header fields.
+  if (eh->version >= 0x30004) {
+    if (!_openslide_fseek(f, (int64_t)(sh->etsoffset + 184), SEEK_SET, err)) {
+      goto FAIL;
+    }
+    if (!_openslide_fread_exact(f, eh->boundary, sizeof(eh->boundary), err)) {
+      goto FAIL;
+    }
   }
 
   // individual tiles
@@ -939,6 +973,9 @@ static bool olympus_open_ets(openslide_t *osr, const char *filename,
 
   uint32_t image_width = 0;
   uint32_t image_height = 0;
+  uint32_t level0_width = 0;
+  uint32_t level0_height = 0;
+  bool have_ets_size = ets_level0_size(eh, &level0_width, &level0_height);
 
   for (int i = 0; i < level_count; ++i) {
     struct level *l = g_slice_new0(struct level);
@@ -950,8 +987,19 @@ static bool olympus_open_ets(openslide_t *osr, const char *filename,
     // were not found in the ETS header...
     // This is just a brute force hacking to provide the correct dimensions
     // of images for low level images
-    image_width = i == 0 ? eh->dimx * tilexmax[i] : ceil(image_width / 2);
-    image_height = i == 0 ? eh->dimy * tileymax[i] : ceil(image_height / 2);
+    if (i == 0) {
+      if (have_ets_size) {
+        image_width = level0_width;
+        image_height = level0_height;
+      } else {
+        // Tile coordinates are 0-based; include the last (possibly partial) tile.
+        image_width = eh->dimx * (tilexmax[i] + 1);
+        image_height = eh->dimy * (tileymax[i] + 1);
+      }
+    } else {
+      image_width = (image_width + 1) / 2;
+      image_height = (image_height + 1) / 2;
+    }
 
     // TODO: It works ONLY for image without z-stack!
     g_assert( eh->dimz == 1 );
@@ -988,7 +1036,20 @@ static bool olympus_open_ets(openslide_t *osr, const char *filename,
   g_free(tilexmax);
   g_free(tileymax);
 
-  _openslide_set_bounds_props_from_grid(osr, levels[0]->grid);
+  // Bounds are the visible pixel size (imgVolume / ETS boundary), not the
+  // padded tile grid, so partial last tiles are included without extra fill.
+  g_hash_table_insert(osr->properties,
+                      g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_X),
+                      g_strdup("0"));
+  g_hash_table_insert(osr->properties,
+                      g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_Y),
+                      g_strdup("0"));
+  g_hash_table_insert(osr->properties,
+                      g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_WIDTH),
+                      g_strdup_printf("%"PRId64, (int64_t) levels[0]->base.w));
+  g_hash_table_insert(osr->properties,
+                      g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_HEIGHT),
+                      g_strdup_printf("%"PRId64, (int64_t) levels[0]->base.h));
 
   osr->level_count = level_count;
   // osr->plane_count = channels == 0 ? 1 : channels;
