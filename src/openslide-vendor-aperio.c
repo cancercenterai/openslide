@@ -345,6 +345,32 @@ static bool add_properties(openslide_t *osr, TIFF *tiff, GError **err) {
   return true;
 }
 
+// Older slides name label/macro in ImageDescription (second line, first
+// token) instead of TIFF SubfileType.
+static const char *associated_name_from_description(TIFF *tiff) {
+  char *val;
+  if (!TIFFGetField(tiff, TIFFTAG_IMAGEDESCRIPTION, &val)) {
+    return NULL;
+  }
+
+  g_auto(GStrv) lines = g_strsplit_set(val, "\r\n", -1);
+  if (!lines || !lines[0] || !lines[1]) {
+    return NULL;
+  }
+
+  g_auto(GStrv) tokens = g_strsplit(lines[1], " ", -1);
+  if (!tokens || !tokens[0]) {
+    return NULL;
+  }
+  if (!g_ascii_strcasecmp(tokens[0], "label")) {
+    return "label";
+  }
+  if (!g_ascii_strcasecmp(tokens[0], "macro")) {
+    return "macro";
+  }
+  return NULL;
+}
+
 static void propagate_missing_tile(void *key, void *value G_GNUC_UNUSED,
                                    void *data) {
   const int64_t *tile_no = key;
@@ -515,6 +541,9 @@ static bool aperio_open(openslide_t *osr,
             name = "macro";
             break;
           }
+        }
+        if (!name) {
+          name = associated_name_from_description(ct.tiff);
         }
       }
       if (name &&
