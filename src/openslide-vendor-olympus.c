@@ -419,9 +419,17 @@ static bool olympus_tif_detect(const char *filename,
 
   // get number of planes
   char *username = _openslide_xml_xpath_get_string(ctx, "/d:OME/d:Experimenter/@UserName");
-  if (strcmp(username, "olympus")){
+  if (!username || strcmp(username, "olympus") != 0) {
+    g_free(username);
+    xmlXPathFreeContext(ctx);
+    xmlFreeDoc(doc);
+    g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                "Not an Olympus OME-TIFF");
     return false;
   }
+  g_free(username);
+  xmlXPathFreeContext(ctx);
+  xmlFreeDoc(doc);
 
   return true;
 }
@@ -853,7 +861,7 @@ static const struct _openslide_ops olympus_ets_ops = {
 };
 
 
-int ascending_compare (const void * a, const void * b) {
+static int ascending_compare (const void * a, const void * b) {
   return ( *(uint32_t*)b - *(uint32_t*)a );
 }
 

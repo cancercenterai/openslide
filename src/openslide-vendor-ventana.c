@@ -873,6 +873,8 @@ static bool ventana_open(openslide_t *osr, const char *filename,
       g_propagate_error(err, tmp_err);
       return false;
     }
+    scanner_model =
+      g_hash_table_lookup(osr->properties, "ventana.ScannerModel");
   }
   bool is_dp200 = scanner_model && !strcmp(scanner_model, SCANNER_MODEL_DP_200);
 
@@ -1050,6 +1052,9 @@ static bool ventana_open(openslide_t *osr, const char *filename,
   // set region properties
   if (bif) {
     set_region_props(osr, bif, level0);
+    // DP200 pads level dimensions to 16 px.  Publish the unpadded tile
+    // extents so clients (and the extended tests) can find the tissue.
+    _openslide_set_bounds_props_from_grid(osr, &level0->base, level0->grid);
   }
 
   // set hash and TIFF properties

@@ -118,8 +118,8 @@ struct vmic_handlecache {
   zip_int64_t inner_index;
 //  char *inner_filename;
   GQueue *cache;
-  GMutex *lock;
-  GCond *cond;
+  GMutex lock;
+  GCond cond;
   int outstanding;
   int instance_count;
   int instance_max;
@@ -148,7 +148,13 @@ static struct vmic_handle* vmic_handle_new( struct vmic_handlecache *vc,
     if (!zo) {
       goto FAIL;
     }
+#if LIBZIP_VERSION_MAJOR > 1 || \
+    (LIBZIP_VERSION_MAJOR == 1 && LIBZIP_VERSION_MINOR >= 10)
+    zip_source_t *zs = zip_source_zip_file(zo, zo, vc->inner_index, 0, 0, 0,
+                                           NULL);
+#else
     zip_source_t *zs = zip_source_zip(zo, zo, vc->inner_index, 0, 0, 0);
+#endif
     if (!zs) {
       g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
             "vmic_handle_new: cannot create zip source, filename=%s, index=%i",
@@ -194,8 +200,8 @@ static struct vmic_handlecache* vmic_handlecache_create(const char *filename,
     vc->outstanding = 0;
     //g_debug("creating vmic_handlecache file=%s, inner index=%i, inner_size=%li, instance_max=%i\n",
     //        filename, (int)inner_index, (long int)inner_size, (int)vc->instance_max);
-    vc->lock = g_mutex_new();
-    vc->cond = g_cond_new();
+    g_mutex_init(&vc->lock);
+    g_cond_init(&vc->cond);
   }
   return vc;
 }
@@ -204,7 +210,7 @@ static struct vmic_handle* vmic_handle_get(struct vmic_handlecache *vc,
                                            GError **err) {
   //g_debug("get vmici zip");
   struct vmic_handle *vh;
-  g_mutex_lock(vc->lock);
+  g_mutex_lock(&vc->lock);
   // get handle from cache - if none is free, 
   // create new ones till vc->size_meter > VMIC_HC_MAX_ENTRY_COUNT
   // then wait for one to get released
@@ -213,24 +219,24 @@ static struct vmic_handle* vmic_handle_get(struct vmic_handlecache *vc,
        && vc->instance_count >= vc->instance_max ) {
       
       //g_debug("waiting for g_queue_push signal instance_count=%i, outstanding=%i...", (int) vc->instance_count, (int) vc->outstanding);
-      g_cond_wait(vc->cond, vc->lock);
+      g_cond_wait(&vc->cond, &vc->lock);
       //g_debug("..wait ended\n");
   }
   vc->outstanding++;
-  g_mutex_unlock(vc->lock);
+  g_mutex_unlock(&vc->lock);
 
   if (vh == NULL) {
-    g_mutex_lock(vc->lock);
+    g_mutex_lock(&vc->lock);
     vc->instance_count++;
-    g_mutex_unlock(vc->lock);
+    g_mutex_unlock(&vc->lock);
 
     //g_debug("call to vmic_handle_new, instance_count=%i\n", vc->instance_count);
     vh = vmic_handle_new(vc, err);
   }
   if (vh == NULL) { // fail case
-    g_mutex_lock(vc->lock);
+    g_mutex_lock(&vc->lock);
     vc->outstanding--;
-    g_mutex_unlock(vc->lock);
+    g_mutex_unlock(&vc->lock);
   }
   
   return vh;
@@ -243,21 +249,21 @@ static void vmic_handle_put(struct vmic_handlecache *vc,
   }
 
   //g_debug("put vmic\n");
-  g_mutex_lock(vc->lock);
+  g_mutex_lock(&vc->lock);
   g_assert(vc->outstanding);
   vc->outstanding--;
   if (g_queue_get_length(vc->cache) < VMIC_HC_MAX_QUEUE_COUNT) {
     g_queue_push_head(vc->cache, vh);
     vh = NULL;
   }
-  g_cond_signal(vc->cond);
-  g_mutex_unlock(vc->lock);
+  g_cond_signal(&vc->cond);
+  g_mutex_unlock(&vc->lock);
 
   if (vh) {
     //g_debug("too many vmic handles in queue, deleting one\n");
-    g_mutex_lock(vc->lock);
+    g_mutex_lock(&vc->lock);
     vc->instance_count--;
-    g_mutex_unlock(vc->lock);
+    g_mutex_unlock(&vc->lock);
     vmic_handle_delete(vh);
   }
 }
@@ -267,18 +273,18 @@ static void vmic_handlecache_destroy(struct vmic_handlecache *vc) {
     return;
   }
   g_assert(vc->outstanding == 0);
-  g_mutex_lock(vc->lock);
+  g_mutex_lock(&vc->lock);
   struct vmic_handle *vh;
   while ((vh = g_queue_pop_head(vc->cache)) != NULL) {
     //g_debug("delete vmic handle\n");
     vc->instance_count--;
     vmic_handle_delete(vh);
   }
-  g_mutex_unlock(vc->lock);
+  g_mutex_unlock(&vc->lock);
   g_assert(vc->instance_count == 0);
   g_queue_free(vc->cache);
-  g_mutex_free(vc->lock);
-  g_cond_free(vc->cond);
+  g_mutex_clear(&vc->lock);
+  g_cond_clear(&vc->cond);
   g_free(vc->filename);
   g_slice_free(struct vmic_handlecache, vc);
 }
