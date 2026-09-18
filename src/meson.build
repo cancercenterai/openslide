@@ -61,9 +61,11 @@ openslide_sources = files(
   'openslide-jdatasrc.c',
   'openslide-util.c',
   'openslide-vendor-aperio.c',
+  'openslide-vendor-argos.c',
   'openslide-vendor-dicom.c',
   'openslide-vendor-generic-tiff.c',
   'openslide-vendor-hamamatsu.c',
+  'openslide-vendor-huron.c',
   'openslide-vendor-leica.c',
   'openslide-vendor-mirax.c',
   'openslide-vendor-olympus.c',
@@ -109,7 +111,7 @@ libopenslide = library(
   install : true,
 )
 openslide_dep = declare_dependency(
-  include_directories : include_directories('.'),
+  include_directories : '.',
   link_with : libopenslide,
 )
 import('pkgconfig').generate(

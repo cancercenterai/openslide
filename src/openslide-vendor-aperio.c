@@ -41,7 +41,7 @@
 static const char APERIO_DESCRIPTION[] = "Aperio";
 
 #define APERIO_COMPRESSION_JP2K_YCBCR 33003
-#define APERIO_COMPRESSION_JP2K_RGB   33005
+#define APERIO_COMPRESSION_JP2K_MCT   33005
 
 struct aperio_ops_data {
   struct _openslide_tiffcache *tc;
@@ -141,7 +141,7 @@ static bool decode_tile(struct level *l,
   case APERIO_COMPRESSION_JP2K_YCBCR:
     space = OPENSLIDE_JP2K_YCBCR;
     break;
-  case APERIO_COMPRESSION_JP2K_RGB:
+  case APERIO_COMPRESSION_JP2K_MCT:
     space = OPENSLIDE_JP2K_RGB;
     break;
   default:
@@ -189,7 +189,7 @@ static bool read_tile(openslide_t *osr,
                                             level, tile_col, tile_row,
                                             &cache_entry);
   if (!tiledata) {
-    g_autofree uint32_t *buf = g_malloc(tw * th * 4);
+    g_autofree uint32_t *buf = g_new(uint32_t, tw * th);
     if (!decode_tile(l, tiff, buf, tile_col, tile_row, err)) {
       return false;
     }
@@ -345,51 +345,6 @@ static bool add_properties(openslide_t *osr, TIFF *tiff, GError **err) {
   return true;
 }
 
-// add the image from the current TIFF directory
-// returns false and sets GError if fatal error
-// true does not necessarily imply an image was added
-static bool add_associated_image(openslide_t *osr,
-                                 const char *name_if_available,
-                                 tdir_t *icc_dir_if_available,
-                                 struct _openslide_tiffcache *tc,
-                                 TIFF *tiff,
-                                 GError **err) {
-  g_autofree char *name = NULL;
-  if (name_if_available) {
-    name = g_strdup(name_if_available);
-  } else {
-    // get name
-    char *val;
-    if (!TIFFGetField(tiff, TIFFTAG_IMAGEDESCRIPTION, &val)) {
-        printf("could not get name\n");
-      return true;
-    }
-
-    // parse ImageDescription, after newline up to first whitespace -> gives name
-    g_auto(GStrv) lines = g_strsplit_set(val, "\r\n", -1);
-    if (!lines) {
-      return true;
-    }
-
-    if (lines[0] && lines[1]) {
-      char *line = lines[1];
-
-      g_auto(GStrv) names = g_strsplit(line, " ", -1);
-      if (names && names[0]) {
-	name = g_strdup(names[0]);
-      }
-    }
-  }
-
-  if (!name) {
-    return true;
-  }
-
-  return _openslide_tiff_add_associated_image(osr, name, tc,
-                                              TIFFCurrentDirectory(tiff),
-                                              icc_dir_if_available, err);
-}
-
 static void propagate_missing_tile(void *key, void *value G_GNUC_UNUSED,
                                    void *data) {
   const int64_t *tile_no = key;
@@ -474,7 +429,7 @@ static bool aperio_open(openslide_t *osr,
       return false;
     }
     if ((compression != APERIO_COMPRESSION_JP2K_YCBCR) &&
-        (compression != APERIO_COMPRESSION_JP2K_RGB) &&
+        (compression != APERIO_COMPRESSION_JP2K_MCT) &&
         !TIFFIsCODECConfigured(compression)) {
       g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                   "Unsupported TIFF compression: %u", compression);
@@ -532,45 +487,40 @@ static bool aperio_open(openslide_t *osr,
       }
     } else {
       // associated image
-      uint32_t subfile_type;
-      const char *name;
+      const char *name = NULL;
+      g_autofree tdir_t *icc_dir = NULL;
+      if (dir == 1) {
+        name = "thumbnail";
 
-      if (!TIFFGetField(ct.tiff, TIFFTAG_SUBFILETYPE, &subfile_type)) {
-        // Fallback to the older detection mechanism, as it is not validated that this mechanism works for all scanners
-        name = (dir == 1) ? "thumbnail" : NULL;
+        g_autoptr(GHashTable) thumbnail_props = read_properties(ct.tiff, NULL);
+        if (thumbnail_props) {
+          const char *main_icc_name =
+            g_hash_table_lookup(osr->properties, "aperio.ICC Profile");
+          const char *thumbnail_icc_name =
+            g_hash_table_lookup(thumbnail_props, "ICC Profile");
+          if (main_icc_name && thumbnail_icc_name &&
+              g_str_equal(main_icc_name, thumbnail_icc_name)) {
+            // use ICC profile from first directory
+            icc_dir = g_new0(tdir_t, 1);
+          }
+        }
       } else {
-        // GT450 scanner
-        // According to info from Leica: https://github.com/openslide/openslide/issues/297#issuecomment-813424628
-        switch (subfile_type) {
+        uint32_t subfile;
+        if (TIFFGetField(ct.tiff, TIFFTAG_SUBFILETYPE, &subfile)) {
+          switch (subfile) {
           case 1:
             name = "label";
             break;
           case 9:
             name = "macro";
             break;
-          default:
-            name = (dir == 1) ? "thumbnail" : NULL;
-        } 
-      }
-      g_autofree tdir_t *icc_dir = NULL;
-      if (g_str_equal(name, "thumbnail")) {
-        g_autoptr(GHashTable) thumbnail_props = read_properties(ct.tiff, err);
-        if (!thumbnail_props) {
-          g_prefix_error(err, "Reading thumbnail properties: ");
-          return false;
-        }
-        const char *main_icc_name =
-          g_hash_table_lookup(osr->properties, "aperio.ICC Profile");
-        const char *thumbnail_icc_name =
-          g_hash_table_lookup(thumbnail_props, "ICC Profile");
-        if (main_icc_name && thumbnail_icc_name &&
-            g_str_equal(main_icc_name, thumbnail_icc_name)) {
-          // use ICC profile from first directory
-          icc_dir = g_new0(tdir_t, 1);
+          }
         }
       }
-      if (!add_associated_image(osr, name, icc_dir, tc, ct.tiff, err)) {
-	      return false;
+      if (name &&
+          !_openslide_tiff_add_associated_image(osr, name, tc,
+                                                dir, icc_dir, err)) {
+	return false;
       }
       //g_debug("associated image: %d", dir);
     }
